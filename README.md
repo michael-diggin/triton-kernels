@@ -1,2 +1,3 @@
 # triton-kernels
-A repository holding some Triton kernels
+
+A repository holding some kernels I've been playing about with.
