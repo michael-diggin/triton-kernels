@@ -3,21 +3,28 @@ import triton
 import triton.language as tl
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 64}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 256}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 256}, num_stages=4, num_warps=4),
-    ],
-    key=['M', 'N', 'K'],
-)
+def extra_configs():
+  """
+  List of extra configs I tried
+  It seemed to just stick with (32, 32, 64, 4, 4)
+  """
+  return [
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16}, num_stages=3, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=3, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 64}, num_stages=3, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_stages=3, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 256}, num_stages=3, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 16}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 128}, num_stages=4, num_warps=4),
+    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 32, 'BLOCK_K': 256}, num_stages=4, num_warps=4),
+  ]
+
+# Additional configs can be added here, which Triton will try out to find the fastest one
+# if any of the inputs in 'key' change
+# eg
+# @triton.autotune(extra_configs(), key=["M", "N", "K"])
 @triton.jit
 def fused_diffusion(
     # pointers to inputs and output
@@ -30,7 +37,7 @@ def fused_diffusion(
     # block sizes
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     # meta params
-    GROUP_SIZE: tl.constexpr, DTYPE: tl.constexpr
+    GROUP_SIZE: tl.constexpr
 ):
     
     # B is a [M, K] matrix (input)
@@ -93,6 +100,8 @@ def fused_diffusion(
       m_ptrs += BLOCK_K
       lim -= BLOCK_K
 
+    accumulator = accumulator.to(x_ptr.dtype.element_ty)
+
     # second step - load E and D block
     e_block = tl.load(e_ptr+offs_m, mask=z_row_indices<M, other=0.0).expand_dims(-1)
     d_block = tl.load(d_ptr+offs_n, mask=z_col_indices<N, other=0.0).expand_dims(0)
@@ -103,11 +112,6 @@ def fused_diffusion(
     diff_coefs = tl.math.exp2(minus_log2_e*e_block*d_block)
     accumulator = diff_coefs*accumulator
 
-    if DTYPE == "bfloat16":
-      accumulator = accumulator.to(tl.bfloat16)
-    if DTYPE == "float16":
-      accumulator = accumulator.to(tl.float16)
-
     # Set up pointers and masks for storing the output block in Z
     z_ptrs = z_ptr + offs_m[:, None]*stride_zm + offs_n[None, :]*stride_zn
     z_mask = (z_row_indices < M)[:, None] & (z_col_indices < N)[None, :]
@@ -116,24 +120,55 @@ def fused_diffusion(
     tl.store(z_ptrs, accumulator, mask=z_mask)
 
 
-def diffusion(basis, x, mass, evalues, times):
-  k, m = basis.shape
-  _, n = x.shape
-  z = torch.empty((m, n), dtype=x.dtype, device=x.device)
-  b_t = basis.transpose(-2, -1)
+class FlashDiffusion(torch.autograd.Function):
+  '''
+  A custom function that can handle the forward pass and 
+  backward pass for the fused_diffusion kernel
+  '''
 
-  grid = lambda meta: (triton.cdiv(m, meta['BLOCK_M']), triton.cdiv(n, meta['BLOCK_N']))
+  @staticmethod
+  def forward(ctx, b, x, mass, e, d):
+    '''
+    Returns O and S
+    Normal Output and Spectral output
+    '''
+    k, m = b.shape
+    _, n = x.shape
+    s = torch.empty((m, n), dtype=x.dtype, device=x.device)
+    b_t = b.transpose(-2, -1)
 
-  DTYPE="float32"
-  if x.dtype == torch.bfloat16:
-    DTYPE = "bfloat16"
-  if x.dtype == torch.float16:
-    DTYPE = "float16"
+    grid = lambda meta: (triton.cdiv(m, meta['BLOCK_M']), triton.cdiv(n, meta['BLOCK_N']))
 
-  fused_diffusion[grid](b_t, x, mass, evalues, times, z,
-                        m, n, k,
-                        b_t.stride(0), b_t.stride(1), x.stride(0), x.stride(1),
-                        z.stride(0), z.stride(1),
-                        GROUP_SIZE=8, DTYPE=DTYPE)
+    fused_diffusion[grid](b_t, x, mass, e, d, s,
+                          m, n, k,
+                          b_t.stride(0), b_t.stride(1), x.stride(0), x.stride(1),
+                          s.stride(0), s.stride(1),
+                          BLOCK_M=32, BLOCK_N=32, BLOCK_K=64,
+                          GROUP_SIZE=8,
+                          num_warps=4, num_stages=4)
+    output = torch.matmul(b, s)
+    ctx.save_for_backward(s, b, mass, e, d)
+    return output, s
+    
+  @staticmethod
+  def backward(ctx, dO, dS):
+    '''
+    Performs the backward pass for the input X and
+    diffusion times D
+    '''
+    s, b, m, e, d = ctx.saved_tensors
+    # contributions from both dO and dS
+    # does this need a kernel too?
+    s_grad = dS + torch.matmul(b.transpose(-2, -1), dO)
+    dD, dX = None, None
+    dD = -(e.unsqueeze(-1) * s_grad * s).sum(dim=0)
+    if ctx.needs_input_grad[1]:
+      # the input X doesn't always need grads, eg first layer
+      # This could be a kernel too
+      t = torch.exp(-e.unsqueeze(-1)*d)
+      dst = s_grad*t
+      dX = torch.matmul(b*m.unsqueeze(-1), dst)
+    return None, dX, None, None, dD
 
-  return torch.matmul(basis, z), z
+# the function that callers can import and use
+diffusion_func = FlashDiffusion.apply
