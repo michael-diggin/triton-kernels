@@ -2,7 +2,7 @@ import torch
 import triton
 
 from .torch import torch_diffusion
-from .kernel import diffusion_func
+from .function import diffusion_func
 
 if __name__ == '__main__':
 
@@ -12,14 +12,14 @@ if __name__ == '__main__':
     providers = ["Kernel_Func", "Compiled torch", "Torch"]
 
     configs = [triton.testing.Benchmark(
-        x_names=["V"],  # Arg for number of verst
+        x_names=["V"],  # Arg for number of verts
         x_vals=[128 * i for i in range(2, 33)],  # Different possible values V
         line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
         line_vals=providers,
         line_names=providers,
         styles=[("green", "-"), ("blue", "-"), ("red", "-")],
         ylabel="TFLOPS",
-        plot_name="bench",
+        plot_name="bench-fwd",
         args={"data_type": DTYPE}, # any extra args
     )]
 

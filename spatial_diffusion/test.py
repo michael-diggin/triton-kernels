@@ -3,7 +3,7 @@
 import torch
 
 from .torch import torch_diffusion
-from .kernel import diffusion_func
+from .function import diffusion_func
 
 torch.manual_seed(0)
 dtype = torch.bfloat16
@@ -12,7 +12,7 @@ k = 2048
 m = 128
 n = 256
 
-X = torch.rand((k,m), dtype=dtype, device="cuda") / k # this is needed otherwise it would overflow bfloat16 and lead to rounding errors
+X = torch.rand((k,m), dtype=dtype, device="cuda") / k
 BASE_INPUT = torch.rand((k,n), dtype=dtype, device="cuda") / k
 Y_1 = BASE_INPUT.clone()
 Y_1.requires_grad = True
@@ -62,16 +62,13 @@ if __name__ == '__main__':
     True
     2.5331974029541016e-07
 
-
     Spectral Output
     True
     9.298324584960938e-06
 
-
     Grad D Output
     True
-    0.000579833984375
-
+    0.0003814697265625
 
     Grad Y Output
     True
