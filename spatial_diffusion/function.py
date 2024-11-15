@@ -76,6 +76,7 @@ class FlashDiffusion(torch.autograd.Function):
       # the input X doesn't always need grads, eg first layer
 
       # second kernel computes dX using the intermediate dst
+      # fusing the matrix multiply with the elementwise vector*matrix product
       dX = torch.empty((v, n), dtype=dS.dtype, device=dS.device)
       grid = lambda meta: ((triton.cdiv(v, meta['BLOCK_M']), triton.cdiv(n, meta['BLOCK_N'])))
       dx_bwd[grid](b, dst, mass,

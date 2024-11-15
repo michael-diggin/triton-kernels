@@ -1,5 +1,8 @@
 # Spatial Diffusion Kernel
 
+Spatial Diffusion is the first layer of the Diffusion Net model architecture, described in
+https://arxiv.org/abs/2012.00888.
+
 The operations performed in Spatial Diffusion are as followed:
 ```python
 def torch_diffusion(x, basis, mass, evalues, times):
@@ -27,8 +30,7 @@ on the metadata, it doesn't make sense to fuse that into the kernel as there isn
 The main benefit would be to fuse the first matrix multiply with calculating the `diffs` matrix.
 As that way we could compute the `spectral` matrix directly from `x` and `b_t` without needing to write
 `x_m`, `in_basis` and `diffs` to HBM. This has the added benefit that the kernel would require less GPU vram,
-as fewer intermediate tensors are stored for the backward pass. Keep in mind it's not massive, eg for an input with
-4096 vertices, it would save ~1-2 MB
+as fewer intermediate tensors are stored for the backward pass.
 
 ## Results
 
@@ -86,7 +88,7 @@ at 128 and 256 respectively.
 The decrease in vram also is not a huge amount in the grand scheme of things (it is in relative terms), unless the input
 data has tens or hundreds of thousands of verts.
 
-It has still be very interesting to see where gains can still be made, and very interesting to see where torch.compile is
+It has still been very interesting to see where gains can still be made, and very interesting to see where torch.compile is
 lacking.
 
 ## Extra thoughts

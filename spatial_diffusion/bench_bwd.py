@@ -9,7 +9,6 @@ if __name__ == '__main__':
     compiled = torch.compile(torch_diffusion)
 
     DTYPE = torch.bfloat16
-    MODE = "fwd" # can be "bwd" for backward pass
     providers = ["Kernel_Func", "Compiled torch", "Torch"]
 
     configs = [triton.testing.Benchmark(
