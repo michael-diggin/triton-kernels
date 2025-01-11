@@ -1,4 +1,4 @@
-# Split K Kernel (WIP)
+# Split K Kernel
 
 Split-K is an algorithm used in GPU matrix muliplications to gain more parallelism and
 can be effective in certain domains.
@@ -10,8 +10,6 @@ This may not allow for the best GPU utilisation, as a small number of thread blo
 Instead, each thead block could compute a _partial sum_ along the `K` dimension for their output block, and synchronise reducing their partial sums.
 There is an overhead added through the synchronisation, however that is often 'hidden' by the extra parallelism this brings.
 
-This does seem to be beneficial when `K` gets large (`> 10,000`). It beats a typical block tiled Triton kernel, however it is still behind regular torch and cuBLAS:
+This does seem to be beneficial as `K` scales larger. It beats a typical Triton tiled matrix multiplication as is on par with native PyTorch/cuBLAS:
 
 ![Plot of TFLOP/s, higher is better](plots/benchmark.png)
-
-WIP - I'd like to figure out what is the bottleneck with the Triton kernel's that is limiting it from reaching the same performance (or near same) as cuBLAS.
