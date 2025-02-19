@@ -101,3 +101,18 @@ performance out of it.)
 
 `torch.compile` also gets significantly better at this computation once `M` and `N` are larger, though it doesn't
 blow the rest out of the water.
+
+# Can we do better?
+
+Yes - as `V` scales larger, the first matrix multiply becomes the bottleneck. Computing a matmul like
+`(N, V)@(V, W)` in the naive blocked way doesn't work well when `V` is really large. Instead, we can use
+a split-k based algorithm since no part of the fused kernel requires the entire output block to be materialised
+before operating on it (e.g via a relu say).
+
+This works really well for the forward pass:
+
+![Plot of TFLOP/s, higher is better](plots/tflops_with_splitk.png)
+
+The above benchmark was for `float16` (since split-k uses atomic adds, which are only supported for float32 and float16),
+though it looks very similar to `bfloat16` once some minor changes are made. This is much better than before, and is noticeable
+faster than torch.
