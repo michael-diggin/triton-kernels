@@ -50,16 +50,19 @@ class SpatialGradFunction(torch.autograd.Function):
                         GROUP_SIZE=8)
     
     # linear weights
-    dLR = torch.empty((k, n), dtype=dZ.dtype, device=dZ.device)
-    dLI = torch.empty((k, n), dtype=dZ.dtype, device=dZ.device)
+    dLR = torch.empty((k, n), dtype=torch.float32, device=dZ.device)
+    dLI = torch.empty((k, n), dtype=torch.float32, device=dZ.device)
     grid2 = lambda meta: (triton.cdiv(k, meta['BLOCK_M']), triton.cdiv(n, meta['BLOCK_N']))
     _bwd_kernel2[grid2](xgr, xgi, grad_x_real, grad_x_im,
                        dLR, dLI,
                        k, n, m,
                        xgr.stride(0), xgr.stride(1), xgi.stride(0), xgi.stride(1), grad_x_real.stride(0), grad_x_real.stride(1), grad_x_im.stride(0), grad_x_im.stride(1),
                        dLR.stride(0), dLR.stride(1), dLI.stride(0), dLI.stride(1),
-                       BLOCK_M=32, BLOCK_N=32, BLOCK_K=128,
-                       GROUP_SIZE=8)
+                       BLOCK_M=64, BLOCK_N=64, BLOCK_K=64,
+                       GROUP_SIZE=4, SPLIT_K=6)
+    
+    dLR.to(lr.dtype)
+    dLI.to(li.dtype)
 
     # x
     grad_x_grads_real_total = torch.empty((m, n), dtype=xgr.dtype, device=xgr.device)
@@ -74,14 +77,14 @@ class SpatialGradFunction(torch.autograd.Function):
                        GROUP_SIZE=8)
 
     k, m = gr.shape
-    dX = torch.empty((m, n), dtype=dZ.dtype, device=dZ.device)
+    dX = torch.empty((m, n), dtype=torch.float32, device=dZ.device)
     _bwd_kernel4[grid](gr, gi, grad_x_grads_real_total, grad_x_grads_im_total,
                        dX,
                        m, n, k,
                        gr.stride(0), gr.stride(1), gi.stride(0), gr.stride(1),
                        grad_x_grads_real_total.stride(0), grad_x_grads_real_total.stride(1), grad_x_grads_im_total.stride(0), grad_x_grads_im_total.stride(1),
                        dX.stride(0), dX.stride(1),
-                       BLOCK_M=32, BLOCK_N=32, BLOCK_K=128,
-                       GROUP_SIZE=8)
+                       BLOCK_M=32, BLOCK_N=64, BLOCK_K=64,
+                       GROUP_SIZE=4, SPLIT_K=6)
 
-    return dX, dGR, dGI, dLR, dLI
+    return dX.to(dZ.dtype), dGR, dGI, dLR, dLI

@@ -35,25 +35,21 @@ This performs extremely well, giving the following in benchmarking using BFloat1
 
 ![Plot of TFLOP/s, higher is better](plots/fwd_bf16.png)
 
+It looks even more promosing when `V` increases further:
+
+![Plot of TFLOP/s, higher is better](plots/fwd_large.png)
+
 ## Backward Pass
 
 The backward pass is a lot more complicated.
 
 `x`, `linear_real` and `linear_im` need gradients accumulated, but have different dimensions.
-Gradients flow bad through multiple paths, and hence need to be summed.
+Gradients flow back through multiple paths, and hence need to be summed.
 
 This implementation uses 4 separate kernels to compute the backward pass. Two do re-computation and intermediate calculations,
 one does the grads for `linear_real/linear_im` and one does the grads for `x`.
 
-This requires fewer saved tensors than the native torch implementation, and performs pretty decently.
+This requires fewer saved tensors than the native torch implementation, and performs pretty decently,
+especially as `V` increases.
 
 ![Plot of TFLOP/s, higher is better](plots/bwd_bf16.png)
-
-### Current slowdown
-
-Two of the backward kernels are slower than just using torch, when `NUM_VERTS` is very large.
-This is as they are performing matrix multiplications like `(256, NUM_VERTS)x(NUM_VERTS, 256)`.
-A very large inner dimension, with a fairly small outer dimension leads to inefficient use of the GPU.
-
-It's possible that a type of Split-K algorithm may help when `NUM_VERTS` is large, which is next on the list to try.
-

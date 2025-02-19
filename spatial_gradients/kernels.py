@@ -283,7 +283,7 @@ def _bwd_kernel2(
     stride_xgrk, stride_xgrm, stride_xgik, stride_xgim, stride_gradrk, stride_gradrn, stride_gradik, stride_gradin,
     stride_dlrm, stride_dlrn, stride_dlim, stride_dlin,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr, SPLIT_K: tl.constexpr,
 ):
     
     # XGR is a [K, M] matrix (input)
@@ -297,12 +297,13 @@ def _bwd_kernel2(
     # DLI = XGR.T @ GRAD_IM - XGI.T @ GRAD_REAL
 
 
-    # while the lhs of some matmuls are transposed
-    # swizzling doesn't seem to help
-    pid_0 = tl.program_id(0)
-    pid_1 = tl.program_id(1)
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    num_pid_m, num_pid_n = tl.num_programs(0), tl.num_programs(1)
+    pid_0, pid_1 = tl.swizzle2d(pid_m, pid_n, num_pid_m, num_pid_n, GROUP_SIZE)
+    pid_k = tl.program_id(2)
 
-    offs_k = tl.arange(0, BLOCK_K)
+    offs_k = pid_k*BLOCK_K + tl.arange(0, BLOCK_K)
 
     z_row_indices = pid_0 * BLOCK_M + tl.arange(0, BLOCK_M)
     z_col_indices = pid_1 * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -323,12 +324,12 @@ def _bwd_kernel2(
     acc_i = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     lim = K
-    xgr_k = BLOCK_K*stride_xgrk
-    xgi_k = BLOCK_K*stride_xgik
-    grad_real_k = BLOCK_K*stride_gradrk
-    grad_im_k = BLOCK_K*stride_gradik
+    xgr_k = BLOCK_K*stride_xgrk*SPLIT_K
+    xgi_k = BLOCK_K*stride_xgik*SPLIT_K
+    grad_real_k = BLOCK_K*stride_gradrk*SPLIT_K
+    grad_im_k = BLOCK_K*stride_gradik*SPLIT_K
 
-    for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
+    for k in tl.range(0, tl.cdiv(K, BLOCK_K*SPLIT_K)):
 
         xgr_block = tl.load(xgr_ptrs, mask=(offs_k[:, None] < lim) & xg_mask, other=0.0).trans()
         xgi_block = tl.load(xgi_ptrs, mask=(offs_k[:, None] < lim) & xg_mask, other=0.0).trans()
@@ -342,7 +343,7 @@ def _bwd_kernel2(
         xgi_ptrs += xgi_k
         grad_real_ptrs += grad_real_k
         grad_im_ptrs += grad_im_k
-        lim -= BLOCK_K
+        lim -= BLOCK_K*SPLIT_K
 
     acc_r = acc_r.to(dlr_ptr.dtype.element_ty)
     acc_i = acc_i.to(dli_ptr.dtype.element_ty)
@@ -351,8 +352,15 @@ def _bwd_kernel2(
     dli_ptrs = dli_ptr + offs_m[:, None]*stride_dlim + offs_n[None, :]*stride_dlin
     z_mask = (z_row_indices < M)[:, None] & (z_col_indices < N)[None, :]
 
-    tl.store(dlr_ptrs, acc_r, mask=z_mask)
-    tl.store(dli_ptrs, acc_i, mask=z_mask)
+    tl.atomic_add(dlr_ptrs, acc_r, mask=z_mask, sem="relaxed")
+    tl.atomic_add(dli_ptrs, acc_i, mask=z_mask, sem="relaxed")
+
+def _zero_output2(*args, **kwargs):
+    if kwargs["SPLIT_K"] != 1:
+      args[4].zero_()
+      args[5].zero_()
+
+_bwd_kernel2.add_pre_run_hook(_zero_output2)
 
 @triton.jit
 def _bwd_kernel3(
@@ -450,7 +458,7 @@ def _bwd_kernel4(
     stride_grk, stride_grm, stride_gik, stride_gim, stride_gradrk, stride_gradrn, stride_gradik, stride_gradin,
     stride_dxm, stride_dxn,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr, SPLIT_K: tl.constexpr,
 ):
     
     # GR is a [K, M] matrix (input)
@@ -465,8 +473,9 @@ def _bwd_kernel4(
     pid_n = tl.program_id(1)
     num_pid_m, num_pid_n = tl.num_programs(0), tl.num_programs(1)
     pid_0, pid_1 = tl.swizzle2d(pid_m, pid_n, num_pid_m, num_pid_n, GROUP_SIZE)
+    pid_k = tl.program_id(2)
 
-    offs_k = tl.arange(0, BLOCK_K)
+    offs_k = pid_k*BLOCK_K + tl.arange(0, BLOCK_K)
 
     z_row_indices = pid_0 * BLOCK_M + tl.arange(0, BLOCK_M)
     z_col_indices = pid_1 * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -486,12 +495,12 @@ def _bwd_kernel4(
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     lim = K
-    gr_k = BLOCK_K*stride_grk
-    gi_k = BLOCK_K*stride_gik
-    grad_real_k = BLOCK_K*stride_gradrk
-    grad_im_k = BLOCK_K*stride_gradik
+    gr_k = BLOCK_K*stride_grk*SPLIT_K
+    gi_k = BLOCK_K*stride_gik*SPLIT_K
+    grad_real_k = BLOCK_K*stride_gradrk*SPLIT_K
+    grad_im_k = BLOCK_K*stride_gradik*SPLIT_K
 
-    for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
+    for k in tl.range(0, tl.cdiv(K, BLOCK_K*SPLIT_K)):
 
         gr_block = tl.load(gr_ptrs, mask=(offs_k[:, None] < lim) & g_mask, other=0.0).trans()
         gi_block = tl.load(gi_ptrs, mask=(offs_k[:, None] < lim) & g_mask, other=0.0).trans()
@@ -505,11 +514,16 @@ def _bwd_kernel4(
         gi_ptrs += gi_k
         grad_real_ptrs += grad_real_k
         grad_im_ptrs += grad_im_k
-        lim -= BLOCK_K
+        lim -= BLOCK_K*SPLIT_K
 
     acc = acc.to(dx_ptr.dtype.element_ty)
 
     dx_ptrs = dx_ptr + offs_m[:, None]*stride_dxm + offs_n[None, :]*stride_dxn
-    z_mask = g_mask & grad_mask
 
-    tl.store(dx_ptrs, acc, mask=z_mask)
+    tl.atomic_add(dx_ptrs, acc, sem="relaxed")
+
+def _zero_output4(*args, **kwargs):
+    if kwargs["SPLIT_K"] != 1:
+      args[4].zero_()
+
+_bwd_kernel4.add_pre_run_hook(_zero_output4)
