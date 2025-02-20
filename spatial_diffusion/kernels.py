@@ -111,7 +111,7 @@ def dd_ds_bwd(
     # Matrix dimensions
     M, N, K,
     # matrix strides
-    stride_dsm, stride_dsn, stride_dok, stride_don, stride_bk, stride_bm, stride_sm, stride_sn,
+    stride_dsm, stride_dsn, stride_dok, stride_don, stride_bm, stride_bk, stride_sm, stride_sn,
     stride_zm, stride_zn,
     # block sizes -> typically 128, 32, 32
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
