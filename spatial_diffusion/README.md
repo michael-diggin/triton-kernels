@@ -116,3 +116,7 @@ This works really well for the forward pass:
 The above benchmark was for `float16` (since split-k uses atomic adds, which are only supported for float32 and float16),
 though it looks very similar to `bfloat16` once some minor changes are made. This is much better than before, and is noticeable
 faster than torch.
+
+Similarly for large `V` the backward pass wasn't very effecient but using split-k also helps to match torch:
+
+![Plot of TFLOP/s, higher is better](plots/bwd.png)

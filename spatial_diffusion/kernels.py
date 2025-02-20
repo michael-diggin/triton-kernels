@@ -103,7 +103,7 @@ def fused_diffusion(
 
 
 @triton.jit
-def dd_ds_bwd(
+def _dd_ds_bwd(
     # pointers to inputs
     ds_ptr, do_ptr, b_ptr, s_ptr, e_ptr, d_ptr,
     # pointers to outputs
@@ -113,12 +113,12 @@ def dd_ds_bwd(
     # matrix strides
     stride_dsm, stride_dsn, stride_dok, stride_don, stride_bm, stride_bk, stride_sm, stride_sn,
     stride_zm, stride_zn,
-    # block sizes -> typically 128, 32, 32
+    # block sizes -> probs 128, 32, 32
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     # meta params
-    GROUP_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr, SPLIT_K: tl.constexpr,
 ):
-    
+
     # dS is a [M, N] matrix (input)
     # dO is a [V, N] matrix (input)
     # B is a [M, K] matrix (input)
@@ -141,13 +141,14 @@ def dd_ds_bwd(
     pid_n = tl.program_id(1)
     num_pid_m, num_pid_n = tl.num_programs(0), tl.num_programs(1)
     pid_0, pid_1 = tl.swizzle2d(pid_m, pid_n, num_pid_m, num_pid_n, GROUP_SIZE)
+    pid_k = tl.program_id(2)
 
     # Offsets for the K dimension (looped dimension)
-    offs_k = tl.arange(0, BLOCK_K)  # range within the K block
+    offs_k = pid_k*BLOCK_K + tl.arange(0, BLOCK_K)  # range within the K block
 
     # Compute row and column indices for the output X block
-    x_row_indices = pid_0 * BLOCK_M + tl.arange(0, BLOCK_M)
-    x_col_indices = pid_1 * BLOCK_N + tl.arange(0, BLOCK_N)
+    x_row_indices = pid_0 * BLOCK_M + tl.arange(0, BLOCK_M)  # Output rows in X/Y
+    x_col_indices = pid_1 * BLOCK_N + tl.arange(0, BLOCK_N)  # Output cols in X/Y
 
     # hint to the compiler that these are contiguous
     offs_m = tl.max_contiguous(tl.multiple_of(x_row_indices, BLOCK_M), BLOCK_M)
@@ -167,11 +168,11 @@ def dd_ds_bwd(
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     lim = K
-    b_k = BLOCK_K*stride_bk
-    do_k = BLOCK_K*stride_dok
+    b_k = BLOCK_K*stride_bk*SPLIT_K
+    do_k = BLOCK_K*stride_dok*SPLIT_K
 
     # Loop over the K dimension in chunks of BLOCK_K
-    for _ in range(0, tl.cdiv(K, BLOCK_K)):
+    for k in range(0, tl.cdiv(K, BLOCK_K*SPLIT_K)):
 
       b_block = tl.load(b_ptrs, mask=(offs_k[None, :] < lim) & b_mask, other=0.0)
       do_block = tl.load(do_ptrs, mask=(offs_k[:, None] < lim) & do_mask, other=0.0)
@@ -181,29 +182,33 @@ def dd_ds_bwd(
 
       b_ptrs += b_k
       do_ptrs += do_k
-      lim -= BLOCK_K
+      lim -= BLOCK_K*SPLIT_K
 
     accumulator.to(ds_ptr.dtype.element_ty)
 
     output_mask = (x_row_indices < M)[:, None] & (x_col_indices < N)[None, :]
 
     # second step - load dS block to add to accumulator
-    ds_ptrs = ds_ptr + offs_m[:, None]*stride_dsm + offs_n[None, :]*stride_dsn
-    ds_block = tl.load(ds_ptrs, mask=output_mask, other=0.0)
+    if pid_k == 0:
+      ds_ptrs = ds_ptr + offs_m[:, None]*stride_dsm + offs_n[None, :]*stride_dsn
+      ds_block = tl.load(ds_ptrs, mask=output_mask, other=0.0)
 
-    accumulator += ds_block
+      accumulator += ds_block
 
     # third step - load the S and E blocks
     s_ptrs = s_ptr + offs_m[:, None]*stride_sm + offs_n[None, :]*stride_sn
     s_block = tl.load(s_ptrs, mask=output_mask, other=0.0)
     e_block = tl.load(e_ptr+offs_m, mask=x_row_indices<M, other=0.0).expand_dims(-1)
 
-    # reduce along the 0 dimension and write to the Y row vector
     y_block = -1*e_block*s_block*accumulator
     y_sum = tl.sum(y_block, axis=0)
-    tl.store(y_ptr + offs_n, y_sum, mask=(x_col_indices<N))
 
-    # forth step - load D block to compute the exponentiated term
+    # Set up pointers and masks for storing the output block in Y
+    if SPLIT_K == 1:
+      tl.store(y_ptr + offs_n, y_sum, mask=(x_col_indices<N))
+    else:
+      tl.atomic_add(y_ptr + offs_n, y_sum, mask=(x_col_indices<N), sem="relaxed")
+
     d_block = tl.load(d_ptr + offs_n, mask=x_col_indices<N, other=0.0).expand_dims(0)
 
     # make use of the following identity - supposedly 'more stable'
@@ -215,11 +220,21 @@ def dd_ds_bwd(
     # Set up pointers and masks for storing the second output block in Z
     z_ptrs = z_ptr + offs_m[:, None]*stride_zm + offs_n[None, :]*stride_zn
     # Store the accumulated result in Z
-    tl.store(z_ptrs, z_block, mask=output_mask)
+    if SPLIT_K == 1:
+      tl.store(z_ptrs, z_block, mask=output_mask)
+    else:
+      tl.atomic_add(z_ptrs, z_block, mask=output_mask, sem="relaxed")
+
+def _zero_output_bwd(*args, **kwargs):
+    if kwargs["SPLIT_K"] != 1:
+      args[6].zero_()
+      args[7].zero_()
+
+_dd_ds_bwd.add_pre_run_hook(_zero_output_bwd)
 
 
 @triton.jit
-def dx_bwd(
+def _dx_bwd(
     # pointers to inputs
     b_ptr, s_ptr, mass_ptr,
     # pointers to outputs
