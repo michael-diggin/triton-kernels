@@ -39,6 +39,24 @@ It looks even more promosing when `V` increases further:
 
 ![Plot of TFLOP/s, higher is better](plots/fwd_large.png)
 
+Swapping to using an fast but approximate `tanh` implementation with inline PTX gives the following:
+
+![Plot of TFLOP/s, higher is better](plots/fwd_approx_tanh_large.png)
+
+Which is ~10% better when `V` is large, but a little bit slower when `V < ~8192`.
+For reference the Triton code is
+
+```python
+tl.inline_asm_elementwise(
+      asm="tanh.approx.f32 $0, $1;",
+      constraints="=f,f",
+      args=[z],
+      dtype=tl.float32,
+      is_pure=True,
+      pack=1
+    )
+```
+
 ## Backward Pass
 
 The backward pass is a lot more complicated.
