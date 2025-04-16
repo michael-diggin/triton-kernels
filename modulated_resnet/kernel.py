@@ -29,8 +29,8 @@ def _moderesnet_block_kernel(
     # Z2 is a [M, N] matrix (output)
 
     # Computes the following
-    # tmp1 = SiLU(ModAct @ ModW.T)
-    # tmp2 = SiLU(SynAct @ SynW.T)
+    # tmp1 = sigmoid(ModAct @ ModW.T)
+    # tmp2 = sigmoid(SynAct @ SynW.T)
     # tmp3 = tmp1*tmp2
     # Z1 = tmp1, Z2 = tmp3
 
@@ -88,10 +88,9 @@ def _moderesnet_block_kernel(
       syn_act_ptrs += BLOCK_K*stride_synact_k
       synw_ptrs += BLOCK_K*stride_synw_k
 
-    # second step - SiLU and pointwise multiplication
-    mod_acc = mod_acc / (1.0 + tl.exp(-mod_acc))
-    syn_acc = syn_acc / (1.0 + tl.exp(-syn_acc))
-    syn_acc = syn_acc*mod_acc
+    # second step - sigmoid and pointwise multiplication
+    mod_acc = tl.sigmoid(mod_acc)
+    syn_acc = mod_acc * tl.sigmoid(syn_acc)
     
 
     out_mask = (z_row_indices < M)[:, None] & (z_col_indices < N)[None, :]
