@@ -100,26 +100,3 @@ def _moderesnet_block_kernel(
 
     out_ptrs = z2_ptr + offs_m[:, None]*stride_z2m + offs_n[None, :]*stride_z2n
     tl.store(out_ptrs, syn_acc.to(z2_ptr.dtype.element_ty), mask=out_mask)
-
-def triton_modresnet(mod_act: torch.Tensor, syn_act: torch.Tensor, mod_weight: torch.Tensor, syn_weight: torch.Tensor):
-  m, k = mod_act.shape
-  n, _ = mod_weight.shape
-
-  z1 = torch.empty_like(mod_act) # works because the weights are [N, N]
-  z2 = torch.empty_like(syn_act)
-
-  grid = lambda meta: (triton.cdiv(m, meta['BLOCK_M']), triton.cdiv(n, meta['BLOCK_N']))
-  _moderesnet_block_kernel[grid](
-      mod_act, syn_act, mod_weight, syn_weight,
-      z1, z2,
-      m, n, k,
-      mod_act.stride(0), mod_act.stride(1),
-      syn_act.stride(0), syn_act.stride(1),
-      mod_weight.stride(0), mod_weight.stride(1),
-      syn_weight.stride(0), syn_weight.stride(1),
-      z1.stride(0), z1.stride(1), z2.stride(0), z2.stride(1),
-      GROUP_SIZE=8,
-      BLOCK_M=128, BLOCK_N=64, BLOCK_K=32,
-  )
-  return z1, z2
-
